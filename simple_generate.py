@@ -171,6 +171,8 @@ def main(
             sentence = sentence + " " + tok
         print(f"Response: {sentence}")
 
+    print(f"skip_layer / total_layer (%): {model.model.skip_layer} / {model.model.total_layer} \
+          ({model.model.skip_layer / model.model.total_layer * 100: .2f}%)")
     print(f"fetch_time {fetch_time}")
     print(f"forward_time {forward_time}")
     print(f"Total sample time = {(time.time_ns() - sample_start) / 1e9}")

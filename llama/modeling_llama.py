@@ -926,6 +926,9 @@ class LlamaModel(LlamaPreTrainedModel):
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.gradient_checkpointing = False
 
+        self.total_layer = 0
+        self.skip_layer = 0
+
         # Register a causal mask to separate causal and padding mask creation. Merging happens in the attention class.
         # NOTE: This is not friendly with TorchScript, ONNX, ExportedProgram serialization for very large `max_position_embeddings`.
         causal_mask = torch.full(
@@ -941,6 +944,71 @@ class LlamaModel(LlamaPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
+    def entropy(self, x):
+        x = x.clone().to(dtype=torch.float64)
+
+        exp_x = torch.exp(x)
+        A = torch.sum(exp_x, dim=0)    # sum of exp(x_i)
+        B = torch.sum(x*exp_x, dim=0)  # sum of x_i * exp(x_i)
+
+        return torch.log(A) - B/A
+    
+    def detect_skip_layer(
+        self,
+        hidden_states,
+        causal_mask,
+        position_ids,
+        past_key_values,
+        output_attentions,
+        use_cache,
+        cache_position,
+        lm_head,
+    ):
+        # forward
+        entropy = []
+        for decoder_layer in self.layers:
+            layer_outputs = decoder_layer(
+                hidden_states,
+                attention_mask=causal_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+            )
+
+            hidden_states = layer_outputs[0]
+            data = hidden_states[0][-1]
+            if lm_head is not None:
+                data = lm_head(data)
+            entropy.append(self.entropy(data).cpu().item())
+        
+        # detect convex
+        keep_layer = 2
+        slope = 4
+        threshold = 6
+
+        num_layer = 32
+        start_layer = 2
+        end_layer = num_layer - 1 - keep_layer
+        skip_layer = [False] * num_layer
+
+        in_convex = False
+        for i in range(start_layer, end_layer + 1):
+            if not in_convex and entropy[i] < threshold and entropy[i] - entropy[i - 2] < -slope:
+                in_convex = True
+                skip_layer[i] = True
+            elif in_convex and entropy[i] - entropy[i - 2] > slope:
+                in_convex = False
+                skip_layer[i - 2] = skip_layer[i - 1] = False
+            elif in_convex:
+                skip_layer[i] = True
+        
+        self.total_layer += num_layer
+        self.skip_layer += skip_layer.count(True)
+
+        return skip_layer
+
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
     def forward(
         self,
@@ -954,12 +1022,14 @@ class LlamaModel(LlamaPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        lm_head = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
+        use_cache = False
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -992,6 +1062,17 @@ class LlamaModel(LlamaPreTrainedModel):
 
         causal_mask = self._update_causal_mask(attention_mask, inputs_embeds)
 
+        skip_layer = self.detect_skip_layer(
+            inputs_embeds,
+            causal_mask,
+            position_ids,
+            past_key_values,
+            output_attentions,
+            use_cache,
+            cache_position, 
+            lm_head, # Optional
+        )
+
         # embed positions
         hidden_states = inputs_embeds
 
@@ -1000,7 +1081,11 @@ class LlamaModel(LlamaPreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        for decoder_layer in self.layers:
+        for idx, decoder_layer in enumerate(self.layers):
+            # skip layers
+            if skip_layer[idx] is True:
+                continue
+
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -1184,6 +1269,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            lm_head=self.lm_head
         )
 
         hidden_states = outputs[0]
