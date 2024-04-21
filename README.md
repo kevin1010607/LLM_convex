@@ -67,3 +67,16 @@ sbatch test.sh
 cd llm_eval
 sbatch eval.sh
 ```
+
+## Run llm_eval and calculate skip layer ratio
+- Only one task can be run at a time.
+- The result of skip layer will store in `llm_eval/result/skip_layer.txt`.
+- Use `skip-ratio.py` to calculate the skip layer ratio.
+
+```bash
+cd llm_eval 
+sbatch eval.sh
+
+cd ..
+python skip-ratio.py
+```

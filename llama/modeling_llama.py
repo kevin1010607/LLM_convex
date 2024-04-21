@@ -1007,6 +1007,9 @@ class LlamaModel(LlamaPreTrainedModel):
         self.total_layer += num_layer
         self.skip_layer += skip_layer.count(True)
 
+        with open('result/skip_layer.txt', 'a') as fh:
+            fh.write(f'{skip_layer.count(True)}\n')
+
         return skip_layer
 
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
